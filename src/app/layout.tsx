@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import Script from "next/script";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -14,8 +15,49 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // 从环境变量获取配置
+  const gaId = process.env.NEXT_PUBLIC_GA_ID;
+  const gadsId = process.env.NEXT_PUBLIC_GADS_ID;
+
   return (
     <html lang="en">
+      <head>
+        {/* Google Analytics */}
+        {gaId && (
+          <>
+            <Script
+              src={`https://www.googletagmanager.com/gtag/js?id=${gaId}`}
+              strategy="afterInteractive"
+            />
+            <Script id="google-analytics" strategy="afterInteractive">
+              {`
+                window.dataLayer = window.dataLayer || [];
+                function gtag(){dataLayer.push(arguments);}
+                gtag('js', new Date());
+                gtag('config', '${gaId}');
+              `}
+            </Script>
+          </>
+        )}
+        
+        {/* Google Ads */}
+        {gadsId && (
+          <>
+            <Script
+              src={`https://www.googletagmanager.com/gtag/js?id=${gadsId}`}
+              strategy="afterInteractive"
+            />
+            <Script id="google-ads" strategy="afterInteractive">
+              {`
+                window.dataLayer = window.dataLayer || [];
+                function gtag(){dataLayer.push(arguments);}
+                gtag('js', new Date());
+                gtag('config', '${gadsId}');
+              `}
+            </Script>
+          </>
+        )}
+      </head>
       <body className={inter.className}>{children}</body>
     </html>
   );
