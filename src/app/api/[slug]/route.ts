@@ -19,7 +19,7 @@ export async function GET(
         // 处理HTTP错误响应
         if (!response.ok) {
             const errorBody = await response.text();
-            throw new Error(`API请求失败，状态码: ${response.status}，错误信息: ${errorBody}`);
+            throw new Error(`API请求失败，url:${url}，状态码: ${response.status}，错误信息: ${errorBody}`);
         }
 
         // 创建流式响应
