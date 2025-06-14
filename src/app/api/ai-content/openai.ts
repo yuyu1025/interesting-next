@@ -287,9 +287,9 @@ export async function callOpenAiApiStream(url: string, userAgent: string): Promi
 
         // 根据请求信息创建提示词和API请求体
         const prompt = createPrompt(url, userAgent);
-        console.log(`正在发送流式请求，路径: ${url} (包含AdSense指令)`);
-
         const llmUrl = `${baseUrl}/chat/completions`;
+
+        console.log(`正在发送流式请求，路径: ${url} (包含AdSense指令)，目标 url: ${llmUrl}`);
         const requestOptions: RequestInit = {
             method: 'POST',
             headers: {
