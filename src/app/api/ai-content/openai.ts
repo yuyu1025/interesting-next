@@ -215,14 +215,14 @@ async function fetchWithRetry(url: string, options: RequestInit, retries: number
         } else {
             // 网络错误等其他异常
             const networkError = new OpenAIError(
-                `网络请求失败: ${error.message}`,
+                `网络请求失败: ${(error as Error).message}`,
                 0,
                 'network_error',
                 retries > 0
             );
 
             if (retries > 0) {
-                console.warn(`网络请求失败，${RETRY_DELAY}ms 后重试 (剩余 ${retries} 次):`, error.message);
+                console.warn(`网络请求失败，${RETRY_DELAY}ms 后重试 (剩余 ${retries} 次):`, (error as Error).message);
                 await delay(RETRY_DELAY);
                 return fetchWithRetry(url, options, retries - 1);
             }
