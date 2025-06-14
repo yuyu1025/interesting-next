@@ -106,7 +106,9 @@ function createApiPayload(prompt: string): object {
  */
 export async function callOpenAiApiStream(url: string, userAgent: string): Promise<Response> {
     // 验证API密钥是否存在
-    validateApiKey();
+    if (!validateApiKey()) {
+        return new Response('API Key not provided. Use OPENAI_API_KEY env var.', { status: 400 });
+    }
 
     // 根据请求信息创建提示词和API请求体
     const prompt = createPrompt(url, userAgent);
