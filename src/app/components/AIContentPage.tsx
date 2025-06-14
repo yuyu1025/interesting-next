@@ -51,8 +51,11 @@ export default async function AIContentPage({ path }: AIContentPageProps) {
     }
     
     // 清理HTML内容
-    const cleanHtml = htmlContent.replace(/^```html\s*|```$/g, '').trim();
-    
+    // 只处理开头和结尾的 ```html 标记，保留中间的内容
+    const cleanHtml = htmlContent
+      .replace(/^```html\n/, '') // 移除开头的 ```html
+      .replace(/\n```$/, '')     // 移除结尾的 ```
+      .trim();
     // 直接返回HTML内容
     return (
       <div dangerouslySetInnerHTML={{ __html: cleanHtml }} />
