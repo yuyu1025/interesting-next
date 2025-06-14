@@ -1,24 +1,25 @@
-import { callOpenAiApiStream } from "../ai-content/openai";
-import { NextRequest, NextResponse } from 'next/server';
+import {callOpenAiApiStream} from "../ai-content/openai";
+import {NextRequest, NextResponse} from 'next/server';
 
 /**
  * Handles GET requests for dynamic slug routes with streaming response
  */
 export async function GET(
     request: NextRequest,
-    { params }: { params: { slug: string } }
+    {params}: { params: { slug: string } }
 ): Promise<NextResponse> {
     try {
         // 从请求中获取 URL 和 User-Agent
         const url = request.nextUrl.pathname;
         const userAgent = request.headers.get('user-agent') || '';
-        
+
         // 调用OpenAI流式API
         const response = await callOpenAiApiStream(url, userAgent);
 
         // 处理HTTP错误响应
         if (!response.ok) {
             const errorBody = await response.text();
+            console.log('API请求失败，url:', url, '状态码:', response.status, '错误信息:', errorBody);
             throw new Error(`API请求失败，url:${url}，状态码: ${response.status}，错误信息: ${errorBody}`);
         }
 
@@ -28,7 +29,7 @@ export async function GET(
                 const reader = response.body?.getReader();
                 const decoder = new TextDecoder();
                 let htmlContent = '';
-                
+
                 if (!reader) {
                     controller.close();
                     return;
@@ -36,8 +37,8 @@ export async function GET(
 
                 try {
                     while (true) {
-                        const { done, value } = await reader.read();
-                        
+                        const {done, value} = await reader.read();
+
                         if (done) {
                             // 流结束，处理完整的HTML内容
                             const finalHtml = extractContentFromStreamResponse(htmlContent);
@@ -55,18 +56,18 @@ export async function GET(
                         // 解析SSE数据
                         const chunk = decoder.decode(value);
                         const lines = chunk.split('\n');
-                        
+
                         for (const line of lines) {
                             if (line.startsWith('data: ')) {
                                 const data = line.slice(6);
                                 if (data === '[DONE]') {
                                     continue;
                                 }
-                                
+
                                 try {
                                     const parsed = JSON.parse(data);
                                     const content = parsed.choices?.[0]?.delta?.content;
-                                    
+
                                     if (content) {
                                         htmlContent += content;
                                         // 实时发送内容块
@@ -120,7 +121,7 @@ export async function GET(
  */
 function extractContentFromStreamResponse(content: string): string | null {
     if (!content) return null;
-    
+
     // Remove markdown code block markers if present
     let htmlContent = content.replace(/^```html\s*|```$/g, '').trim();
     return htmlContent || null;
@@ -143,6 +144,7 @@ function extractContentFromResponse(result: any): string | null {
 
     return null;
 }
+
 /**
  * Generates error HTML template
  * @param {string} title - Error title
