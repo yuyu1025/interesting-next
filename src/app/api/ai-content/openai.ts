@@ -1,4 +1,5 @@
 const http = require('http');
+
 /**
  * Parses command-line arguments to find the API key.
  * It supports formats like --apiKey=YOUR_KEY or --apiKey YOUR_KEY.
@@ -15,6 +16,26 @@ const baseUrl = process.env.BASE_URL || 'https://api.openai.com/v1';
 const model = process.env.MODEL || 'gpt-3.5-turbo';
 const adSenseClientId = process.env.ADSENSE_CLIENT_ID || 'ca-pub-XXXXXXXXXXXXXXXX';
 
+// 配置常量
+const REQUEST_TIMEOUT = 30000; // 30秒超时
+const MAX_RETRIES = 3; // 最大重试次数
+const RETRY_DELAY = 1000; // 重试延迟（毫秒）
+
+/**
+ * 自定义错误类型
+ */
+class OpenAIError extends Error {
+    constructor(
+        message: string,
+        public statusCode?: number,
+        public errorType?: string,
+        public retryable: boolean = false
+    ) {
+        super(message);
+        this.name = 'OpenAIError';
+    }
+}
+
 /**
  * Generates Google AdSense code snippet
  * @returns {string} AdSense script tag
@@ -30,16 +51,8 @@ function generateAdSenseCode(): string {
  * @param {string} userAgent - User agent string
  * @returns {string} Generated prompt
  */
-function createPrompt( url: string, userAgent: string): string {
+function createPrompt(url: string, userAgent: string): string {
     const adSenseCode = generateAdSenseCode();
-
-    // return `你是一个 HTTP server ，请求路径是 ${url} ,请你对此请求路径写出对应的 html 文档，
-    // 用户userAgent是${userAgent}，根据该信息做页面适配，
-    // HTML 文档的 head 标签中必须包含一个 charset=utf-8 标签，
-    // 并且，请务必在 head 标签中加入这段 Google AdSense 广告代码: ${adSenseCode} ，
-    // 样式只能写成行内样式，写在标签的 style 属性上！
-    // 除了 html 内容外不要返回其他内容！
-    // 并且 html 内最少要有一个超链接，路径必须是本站的绝对路径。`;
 
     return `
 Role: 资深 HTTP 服务器开发与 HTML 构建专家
@@ -99,31 +112,220 @@ function createApiPayload(prompt: string): object {
 }
 
 /**
- * Makes streaming API request to OpenAI
+ * 延迟函数
+ * @param {number} ms - 延迟毫秒数
+ */
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * 解析 OpenAI API 错误响应
+ * @param {Response} response - API 响应
+ * @returns {Promise<OpenAIError>} 解析后的错误
+ */
+async function parseApiError(response: Response): Promise<OpenAIError> {
+    let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+    let errorType = 'unknown';
+    let retryable = false;
+    try {
+        const errorData = await response.json() as {
+            error?: {
+                message?: string;
+                type?: string;
+            }
+        };
+
+        if (errorData.error) {
+            errorMessage = errorData.error.message ?? errorMessage;
+            errorType = errorData.error.type ?? 'api_error';
+
+            // 判断是否可重试
+            retryable = response.status >= 500 ||
+                response.status === 429 ||
+                response.status === 408;
+        }
+    } catch (parseError) {
+        console.warn('无法解析错误响应:', parseError);
+    }
+    return new OpenAIError(errorMessage, response.status, errorType, retryable);
+}
+
+/**
+ * 创建带超时的 fetch 请求
+ * @param {string} url - 请求 URL
+ * @param {RequestInit} options - 请求选项
+ * @param {number} timeout - 超时时间（毫秒）
+ * @returns {Promise<Response>} fetch 响应
+ */
+function fetchWithTimeout(url: string, options: RequestInit, timeout: number): Promise<Response> {
+    return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+            reject(new OpenAIError('请求超时', 408, 'timeout', true));
+        }, timeout);
+
+        fetch(url, options)
+            .then(response => {
+                clearTimeout(timeoutId);
+                resolve(response);
+            })
+            .catch(error => {
+                clearTimeout(timeoutId);
+                reject(error);
+            });
+    });
+}
+
+/**
+ * 带重试机制的 API 请求
+ * @param {string} url - 请求 URL
+ * @param {RequestInit} options - 请求选项
+ * @param {number} retries - 剩余重试次数
+ * @returns {Promise<Response>} API 响应
+ */
+async function fetchWithRetry(url: string, options: RequestInit, retries: number = MAX_RETRIES): Promise<Response> {
+    try {
+        const response = await fetchWithTimeout(url, options, REQUEST_TIMEOUT);
+
+        // 检查响应状态
+        if (!response.ok) {
+            const error = await parseApiError(response);
+
+            // 如果可重试且还有重试次数
+            if (error.retryable && retries > 0) {
+                console.warn(`API 请求失败，${RETRY_DELAY}ms 后重试 (剩余 ${retries} 次):`, error.message);
+                await delay(RETRY_DELAY);
+                return fetchWithRetry(url, options, retries - 1);
+            }
+
+            throw error;
+        }
+
+        return response;
+    } catch (error) {
+        // 网络错误或其他异常
+        if (error instanceof OpenAIError) {
+            // 如果是我们的自定义错误，直接抛出
+            if (error.retryable && retries > 0) {
+                console.warn(`请求失败，${RETRY_DELAY}ms 后重试 (剩余 ${retries} 次):`, error.message);
+                await delay(RETRY_DELAY);
+                return fetchWithRetry(url, options, retries - 1);
+            }
+            throw error;
+        } else {
+            // 网络错误等其他异常
+            const networkError = new OpenAIError(
+                `网络请求失败: ${error.message}`,
+                0,
+                'network_error',
+                retries > 0
+            );
+
+            if (retries > 0) {
+                console.warn(`网络请求失败，${RETRY_DELAY}ms 后重试 (剩余 ${retries} 次):`, error.message);
+                await delay(RETRY_DELAY);
+                return fetchWithRetry(url, options, retries - 1);
+            }
+
+            throw networkError;
+        }
+    }
+}
+
+/**
+ * 生成错误响应的 HTML
+ * @param {string} errorMessage - 错误信息
+ * @param {number} statusCode - HTTP 状态码
+ * @returns {string} 错误页面 HTML
+ */
+function generateErrorHtml(errorMessage: string, statusCode: number): string {
+    const adSenseCode = generateAdSenseCode();
+
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>服务暂时不可用</title>
+    ${adSenseCode}
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+    <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <h1 style="color: #e74c3c; margin-bottom: 20px;">🚧 服务暂时不可用</h1>
+        <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
+            抱歉，我们的 AI 内容生成服务目前遇到了一些技术问题。请稍后再试。
+        </p>
+        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+            <strong style="color: #495057;">错误信息:</strong>
+            <code style="color: #e83e8c; background-color: #f1f3f4; padding: 2px 4px; border-radius: 3px;">${errorMessage}</code>
+        </div>
+        <div style="margin-top: 30px;">
+            <a href="/" style="display: inline-block; background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-right: 10px;">返回首页</a>
+            <button onclick="location.reload()" style="background-color: #28a745; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer;">重新加载</button>
+        </div>
+    </div>
+</body>
+</html>`;
+}
+
+/**
+ * Makes streaming API request to OpenAI with comprehensive error handling
  * @param {string} url - Request URL
  * @param {string} userAgent - User agent string
- * @returns {Promise<Response>} Fetch response with streaming
+ * @returns {Promise<Response>} Fetch response with streaming or error response
  */
 export async function callOpenAiApiStream(url: string, userAgent: string): Promise<Response> {
-    // 验证API密钥是否存在
-    if (!validateApiKey()) {
-        return new Response('API Key not provided. Use OPENAI_API_KEY env var.', { status: 400 });
-    }
+    try {
+        // 验证API密钥是否存在
+        if (!validateApiKey()) {
+            const errorHtml = generateErrorHtml('API 密钥未配置', 500);
+            return new Response(errorHtml, {
+                status: 500,
+                headers: {'Content-Type': 'text/html; charset=utf-8'}
+            });
+        }
 
-    // 根据请求信息创建提示词和API请求体
-    const prompt = createPrompt(url, userAgent);
-    // 记录当前正在处理的请求路径
-    console.log(`正在发送流式请求，路径: ${url} (包含AdSense指令)`);
-    const llmUrl = `${baseUrl}/chat/completions`;
-    
-    return fetch(llmUrl, {
-        method: 'POST',
-        headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(createApiPayload(prompt))
-    });
+        // 根据请求信息创建提示词和API请求体
+        const prompt = createPrompt(url, userAgent);
+        console.log(`正在发送流式请求，路径: ${url} (包含AdSense指令)`);
+
+        const llmUrl = `${baseUrl}/chat/completions`;
+        const requestOptions: RequestInit = {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(createApiPayload(prompt))
+        };
+
+        // 使用带重试机制的请求
+        const response = await fetchWithRetry(llmUrl, requestOptions);
+
+        console.log(`OpenAI API 请求成功，状态码: ${response.status}`);
+        return response;
+
+    } catch (error) {
+        console.error('OpenAI API 调用失败:', error);
+
+        let errorMessage = '未知错误';
+        let statusCode = 500;
+
+        if (error instanceof OpenAIError) {
+            errorMessage = error.message;
+            statusCode = error.statusCode || 500;
+        } else if (error instanceof Error) {
+            errorMessage = error.message;
+        }
+
+        // 生成错误页面
+        const errorHtml = generateErrorHtml(errorMessage, statusCode);
+
+        return new Response(errorHtml, {
+            status: statusCode,
+            headers: {'Content-Type': 'text/html; charset=utf-8'}
+        });
+    }
 }
 
 /**
